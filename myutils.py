@@ -34,7 +34,7 @@ def load_data(dataset_name: str) -> tuple:
         return [network_homo_data, network_upu_data, network_usu_data, network_uvu_data], features_data, labels
 
 
-def constructPyGHeteroData(dataset_name: str = 'Amazon', train_ratio: float = 0.4, test_ratio: float = 0.67) -> HeteroData:
+def constructPyGHeteroData(dataset_name: str = 'Amazon', train_ratio: float = 0.6, test_ratio: float = 0.67) -> HeteroData:
     """
     将mat形式的数据集转化为HeteroData数据
 
@@ -66,31 +66,31 @@ def constructPyGHeteroData(dataset_name: str = 'Amazon', train_ratio: float = 0.
 
     # adj mat
     # shape -> (|N|,|N|)
-    data['review', 'r1', 'review'].adj = torch.Tensor(
-        network_r1_data.todense().A)
-    data['review', 'r2', 'review'].adj = torch.Tensor(
-        network_r2_data.todense().A)
-    data['review', 'r3', 'review'].adj = torch.Tensor(
-        network_r3_data.todense().A)
+    # data['review', 'r1', 'review'].adj = torch.Tensor(
+    #     network_r1_data.todense().A)
+    # data['review', 'r2', 'review'].adj = torch.Tensor(
+    #     network_r2_data.todense().A)
+    # data['review', 'r3', 'review'].adj = torch.Tensor(
+    #     network_r3_data.todense().A)
     # data['review', 'r1', 'review'].adj = network_r1_data.todense().A
     # data['review', 'r2', 'review'].adj = network_r2_data.todense().A
     # data['review', 'r3', 'review'].adj = network_r3_data.todense().A
 
 
     # adj list
-    data['review', 'r1', 'review'].adj_list = sparse_to_adjlist(network_r1_data)
-    data['review', 'r2', 'review'].adj_list = sparse_to_adjlist(network_r2_data)
-    data['review', 'r3', 'review'].adj_list = sparse_to_adjlist(network_r3_data)
+    data['review', 'r1', 'review'].adj_list = [sparse_to_adjlist(network_r1_data)]
+    data['review', 'r2', 'review'].adj_list = [sparse_to_adjlist(network_r2_data)]
+    data['review', 'r3', 'review'].adj_list = [sparse_to_adjlist(network_r3_data)]
 
     # homo adj list
     # 总感觉有点别扭
-    data['homo_adj_list'] = sparse_to_adjlist(network_homo_data)
+    data['homo_adj_list'] = [sparse_to_adjlist(network_homo_data)]
 
     # relation info -> shape: (2, num_edges)
     # from_scipy_smatrix 返回的是一个元组，第二项是edge_weight——有什么用吗？
-    data['review', 'r1', 'review'].edge_index = from_scipy_sparse_matrix(network_r1_data)[0]
-    data['review', 'r2', 'review'].edge_index = from_scipy_sparse_matrix(network_r2_data)[0]
-    data['review', 'r3', 'review'].edge_index = from_scipy_sparse_matrix(network_r3_data)[0]
+    # data['review', 'r1', 'review'].edge_index = from_scipy_sparse_matrix(network_r1_data)[0]
+    # data['review', 'r2', 'review'].edge_index = from_scipy_sparse_matrix(network_r2_data)[0]
+    # data['review', 'r3', 'review'].edge_index = from_scipy_sparse_matrix(network_r3_data)[0]
     # no edge attr
 
     # split pos and neg
