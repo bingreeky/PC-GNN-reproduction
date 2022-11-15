@@ -7,6 +7,7 @@ from torch_geometric.data import HeteroData
 from torch_geometric.utils import from_scipy_sparse_matrix
 from sklearn.model_selection import train_test_split
 from numpy import random
+from random import choices
 import torch
 from typing import List
 
@@ -34,7 +35,7 @@ def load_data(dataset_name: str) -> tuple:
         return [network_homo_data, network_upu_data, network_usu_data, network_uvu_data], features_data, labels
 
 
-def constructPyGHeteroData(dataset_name: str = 'Amazon', train_ratio: float = 0.6, test_ratio: float = 0.67) -> HeteroData:
+def constructPyGHeteroData(dataset_name: str = 'Amazon', train_ratio: float = 0.6, test_ratio: float = 0.67, save=False) -> HeteroData:
     """
     将mat形式的数据集转化为HeteroData数据
 
@@ -42,6 +43,13 @@ def constructPyGHeteroData(dataset_name: str = 'Amazon', train_ratio: float = 0.
     data: PyG的HeteroData数据
     """
     # TODO 考虑每次把mat转化后的文件储存一下
+
+    try:
+
+        data = torch.load(f"input/{dataset_name}.obj")
+        return data
+    except FileNotFoundError as e:
+        pass
 
     network_data_list, features_data, labels = load_data(dataset_name)
     network_homo_data, network_r1_data, network_r2_data, network_r3_data = network_data_list
@@ -76,11 +84,13 @@ def constructPyGHeteroData(dataset_name: str = 'Amazon', train_ratio: float = 0.
     # data['review', 'r2', 'review'].adj = network_r2_data.todense().A
     # data['review', 'r3', 'review'].adj = network_r3_data.todense().A
 
-
     # adj list
-    data['review', 'r1', 'review'].adj_list = [sparse_to_adjlist(network_r1_data)]
-    data['review', 'r2', 'review'].adj_list = [sparse_to_adjlist(network_r2_data)]
-    data['review', 'r3', 'review'].adj_list = [sparse_to_adjlist(network_r3_data)]
+    data['review', 'r1', 'review'].adj_list = [
+        sparse_to_adjlist(network_r1_data)]
+    data['review', 'r2', 'review'].adj_list = [
+        sparse_to_adjlist(network_r2_data)]
+    data['review', 'r3', 'review'].adj_list = [
+        sparse_to_adjlist(network_r3_data)]
 
     # homo adj list
     # 总感觉有点别扭
@@ -94,7 +104,11 @@ def constructPyGHeteroData(dataset_name: str = 'Amazon', train_ratio: float = 0.
     # no edge attr
 
     # split pos and neg
-    data['review'].train_pos_mask,data['review'].train_neg_mask = split_pos_neg_nodes(train_mask,labels[train_mask])
+    data['review'].train_pos_mask, data['review'].train_neg_mask = split_pos_neg_nodes(
+        train_mask, labels[train_mask])
+
+    if save:
+        torch.save(data, f"./input/{dataset_name}.obj")
 
     return data
 
@@ -115,9 +129,8 @@ def sparse_to_adjlist(sp_matrix) -> List[dict]:
     for index, node in enumerate(edges[0]):
         adj_lists[node].add(edges[1][index])
         adj_lists[edges[1][index]].add(node)
-    
+
     return (adj_lists)
-    
 
 
 def LabelBalancedSampler(batch_mask, y_train, adj_list, size):
@@ -135,10 +148,10 @@ def LabelBalancedSampler(batch_mask, y_train, adj_list, size):
     # 这就是label frequency呀！
     lf_train = (y_train.sum()-len(y_train))*y_train + len(y_train)
     smp_prob = np.array(degree_train) / lf_train
-    return random.choices(batch_mask, weights=smp_prob, k=size)
+    return choices(batch_mask, weights=smp_prob, k=size)
 
 
-def split_pos_neg_nodes(nodes,labels) -> tuple:
+def split_pos_neg_nodes(nodes, labels) -> tuple:
     """ 
     :return 元组 分别装class为0和1的nodes
     """
@@ -149,6 +162,5 @@ def split_pos_neg_nodes(nodes,labels) -> tuple:
         if label == 1:
             pos_nodes.append(aux_nodes[idx])
             neg_nodes.remove(aux_nodes[idx])
-    
 
     return pos_nodes, neg_nodes
