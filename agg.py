@@ -59,7 +59,8 @@ class IntraAgg(nn.Module):
         trainIdx2OrderIdx: dict,
         orderIdx2trainIdx: dict,
         avg_half_pos_neigh: int,
-        train_flag=True  # 如果是test，没法靠标签信息来choose
+        train_flag: bool = True,  # 如果是test，没法靠标签信息来choose
+        rho_neg: float = 0.4
     ):
         """
         在一层关系内进行message passing
@@ -71,9 +72,47 @@ class IntraAgg(nn.Module):
         :param train_pos_logits:
         :param trainIdx2orderIdx: 从真正的node id投射到rxlist中索引的词典
         """
-        # 此时只是train
+
         self.avg_half_pos_neigh = avg_half_pos_neigh
         self.train_pos_mask = train_pos_mask
+
+        # 考察为test/valid的情况
+        if not train_flag:
+            with torch.no_grad():
+                # 首先，肯定要对邻居进行undersample
+                # A(v,u)>0 且 D(v,u) < rho-
+                out_feats = []
+                for idx, one_center_logits in enumerate(batch_center_logits):
+                    # 一定要考虑rxlist里面只有一个元素时的维数情况！
+                    certain_neighbor_logits = batch_all_logits[np.array(itemgetter(
+                        *(rx_list[idx]))(trainIdx2OrderIdx))].reshape(-1, 2)
+                    # 计算distance
+                    distance = torch.abs(certain_neighbor_logits -
+                                         one_center_logits)[:, 0]
+                    howManyNeighbors = distance.shape[0]
+                    sampledNeighbor = (distance.argsort()[
+                        0:int(howManyNeighbors / 2) + 1]).tolist()
+
+                    # undersample之后的orderIdx在undersampledNeighbor里
+                    # 进行aggregate！
+                    neighbor_feats = features[np.array(itemgetter(
+                        *sampledNeighbor)(orderIdx2trainIdx))].reshape(-1, self.feature_dim)
+                    agg_feats = torch.mean(neighbor_feats, axis=0)
+
+                    # 把和中心节点的feat进行contact
+                    # 注意有一个reshape！
+                    contacted_feat = torch.cat(
+                        [features[orderIdx2trainIdx[idx]], agg_feats], axis=0).reshape(1, -1)
+                    # shape: (1,2*h_{l-1})
+
+                    # 进行线性映射
+                    out_feats.append(F.relu(self.proj(contacted_feat)))
+
+                rx_out_feats = torch.cat(out_feats, axis=0)
+                return rx_out_feats
+
+        # 此时只是train
+
         # 首先，肯定要对邻居进行undersample
         # A(v,u)>0 且 D(v,u) < rho-
         rx_list_undersampled = []
@@ -249,14 +288,18 @@ class InterAgg(nn.Module):
         self.adj_lists = adj_lists
         self.train_pos_mask = train_pos_mask
 
-        # 计算minority class的average neighborhood size
-        avg_half_neigh_size = []
-        for relationIdx in range(len(self.adj_lists)):
-            total = 0
-            for trainIdx in self.train_pos_mask:
-                total += len(self.adj_lists[relationIdx][trainIdx])
-            avg_half_neigh_size.append(int(total / len(self.train_pos_mask)))
-        self.avg_half_neigh_size = avg_half_neigh_size
+        if train_flag:
+            # 计算minority class的average neighborhood size
+            avg_half_neigh_size = []
+            for relationIdx in range(len(self.adj_lists)):
+                total = 0
+                for trainIdx in self.train_pos_mask:
+                    total += len(self.adj_lists[relationIdx][trainIdx])
+                avg_half_neigh_size.append(
+                    int(total / len(self.train_pos_mask)))
+            self.avg_half_neigh_size = avg_half_neigh_size
+        else:
+            self.avg_half_neigh_size = [0, 0, 0]  # 意思一下
 
         # batch_mask是什么，是本batch中所要考察的中心点
         # 我们后续要用到的信息包括本batch的中心点及它们的1-hop neighbor
@@ -280,8 +323,9 @@ class InterAgg(nn.Module):
             batch_all_mask).to(self.device)]
         # -> shape (|BatchAll|,feat_dim)
         # postive nodes features
-        pos_features = self.features[torch.LongTensor(
-            self.train_pos_mask).to(self.device)]
+        if train_flag:
+            pos_features = self.features[torch.LongTensor(
+                self.train_pos_mask).to(self.device)]
         # -> shape (|Pos|,feat_dim)
 
         # 出于加快访问速度的考虑（应该是），defaultdict涉及到查找过程——这太慢啦！
@@ -295,7 +339,10 @@ class InterAgg(nn.Module):
         # 先把batch all的logits都算完
         batch_all_logits = self.label_linear(batch_all_features)
         # 注意到，pos mask中的点很明显可能不在batch all中
-        pos_logits = self.label_linear(pos_features)
+        if train_flag:
+            pos_logits = self.label_linear(pos_features)
+        else:
+            pos_logits = None
 
         # 提取一些特定点的logits
         # 提取本batch center点的logits
@@ -311,14 +358,15 @@ class InterAgg(nn.Module):
             self.features,
             batch_center_mask,
             batch_center_label,
-            self.train_pos_mask,
+            self.train_pos_mask,  # test的时候就是None
             r1_list,
             batch_center_logits,
             batch_all_logits,
             pos_logits,
             trainIdx2orderIdx,
             orderIdx2trainIdx,
-            self.avg_half_neigh_size[0]
+            self.avg_half_neigh_size[0],
+            train_flag=train_flag
         )
         r2_embeds = self.intra1.forward(
             self.features,
@@ -331,7 +379,8 @@ class InterAgg(nn.Module):
             pos_logits,
             trainIdx2orderIdx,
             orderIdx2trainIdx,
-            self.avg_half_neigh_size[1]
+            self.avg_half_neigh_size[1],
+            train_flag=train_flag
         )
         r3_embeds = self.intra1.forward(
             self.features,
@@ -344,7 +393,8 @@ class InterAgg(nn.Module):
             pos_logits,
             trainIdx2orderIdx,
             orderIdx2trainIdx,
-            self.avg_half_neigh_size[2]
+            self.avg_half_neigh_size[2],
+            train_flag=train_flag
         )
         # rx_embeds -> (|B|,out_dim)
         all_relation_and_self_embeds = torch.cat(

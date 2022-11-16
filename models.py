@@ -1,3 +1,4 @@
+from sklearn.metrics import f1_score, accuracy_score, recall_score, roc_auc_score, average_precision_score, confusion_matrix
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -75,7 +76,8 @@ class PCGNN(nn.Module):
             batch_center_mask=batch_mask,
             batch_center_label=labels[batch_mask],
             train_pos_mask=train_pos_mask,
-            adj_lists=adj_lists
+            adj_lists=adj_lists,
+            train_flag=train_flag
         )
 
         return embeds, logits
@@ -141,7 +143,7 @@ class GNNStack(torch.nn.Module):
         else:
             raise NotImplementedError
 
-    def forward(self, features, labels, batch_mask, train_pos_mask, adj_lists):
+    def forward(self, features, labels, batch_mask, train_pos_mask, adj_lists, train_flag=True):
         """ 
         :param features: 所有点的features
         :param labels: 所有点的label
@@ -153,7 +155,7 @@ class GNNStack(torch.nn.Module):
 
         for i in range(self.num_layers):
             embeds, logits = self.convs(
-                features, labels, batch_mask, train_pos_mask, adj_lists)
+                features, labels, batch_mask, train_pos_mask, adj_lists, train_flag)
             # x = F.relu(x)
             # x = F.dropout(x, p=self.dropout,training=self.training)
 
@@ -185,6 +187,60 @@ class GNNStack(torch.nn.Module):
 
         return gnn_loss + dist_loss
 
+    def test(self, features, labels, batch_mask, adj_lists, thres=0.5):
+        with torch.no_grad():
+            self.eval()
+            embeds, logits = self.forward(
+                features, labels, batch_mask, None, adj_lists, train_flag=False)
+            gnn_prob = torch.sigmoid(self.final_proj(embeds))  # -> (|B|,2)
+            label_prob1 = torch.sigmoid(logits)
+
+            gnn_prob_arr = gnn_prob.data.cpu().numpy()[:, 1]
+
+            gnn_pred = np.zeros_like(gnn_prob_arr, dtype=np.int32)
+            gnn_pred[gnn_prob_arr >= thres] = 1
+            gnn_pred[gnn_prob_arr < thres] = 0
+
+            f1_label1 = f1_score(labels[batch_mask],
+                                 label_prob1.data.cpu().numpy().argmax(axis=1), average="macro")
+            acc_label1 = accuracy_score(labels[batch_mask],
+                                        label_prob1.data.cpu().numpy().argmax(axis=1))
+            recall_label1 = recall_score(
+                labels[batch_mask], label_prob1.data.cpu().numpy().argmax(axis=1), average="macro")
+
+            gnn_pred_list = gnn_pred.tolist()
+            gnn_prob_list = gnn_prob_arr.tolist()
+            label_list1 = label_prob1.data.cpu().numpy()[:, 1].tolist()
+
+            auc_gnn = roc_auc_score(
+                labels[batch_mask], np.array(gnn_prob_list))
+            ap_gnn = average_precision_score(
+                labels[batch_mask], np.array(gnn_prob_list))
+            auc_label1 = roc_auc_score(
+                labels[batch_mask], np.array(label_list1))
+            ap_label1 = average_precision_score(
+                labels[batch_mask], np.array(label_list1))
+
+            f1_binary_1_gnn = f1_score(labels[batch_mask], np.array(
+                gnn_pred_list), pos_label=1, average='binary')
+            f1_binary_0_gnn = f1_score(labels[batch_mask], np.array(
+                gnn_pred_list), pos_label=0, average='binary')
+            f1_micro_gnn = f1_score(labels[batch_mask], np.array(
+                gnn_pred_list), average='micro')
+            f1_macro_gnn = f1_score(labels[batch_mask], np.array(
+                gnn_pred_list), average='macro')
+            conf_gnn = confusion_matrix(
+                labels[batch_mask], np.array(gnn_pred_list))
+            tn, fp, fn, tp = conf_gnn.ravel()
+
+            print(f"   GNN F1-binary-1: {f1_binary_1_gnn:.4f}\tF1-binary-0: {f1_binary_0_gnn:.4f}" +
+                  f"\tF1-macro: {f1_macro_gnn:.4f}\tAUC: {auc_gnn:.4f}")
+            print(f"   GNN TP: {tp}\tTN: {tn}\tFN: {fn}\tFP: {fp}")
+            print(f"Label1 F1: {f1_label1 / len(batch_mask):.4f}\tAccuracy: {acc_label1 / len(batch_mask):.4f}" +
+                  f"\tRecall: {recall_label1 / len(batch_mask):.4f}\tAUC: {auc_label1:.4f}\tAP: {ap_label1:.4f}")
+
+            return f1_macro_gnn, f1_binary_1_gnn, f1_binary_0_gnn, auc_gnn
+
 
 class ModelHandler():
 
@@ -195,12 +251,13 @@ class ModelHandler():
         random_seed: int = 42,
         use_cuda: bool = True,
         opt: str = 'adam',
-        weight_decay: float = 5e-3,
-        lr: float = 0.01,
+        weight_decay: float = 1e-2,
+        lr: float = 0.005,
         dropout: float = 0.5,
         num_layers: int = 2,
-        num_epochs: int = 50,
-        batch_size: int = 1024
+        num_epochs: int = 51,
+        batch_size: int = 256,
+        valid_epochs: int = 5
     ) -> None:
         np.random.seed(random_seed)
         torch.manual_seed(random_seed)
@@ -218,6 +275,7 @@ class ModelHandler():
         self.opt, self.weight_decay, self.lr = opt, weight_decay, lr
         self.num_epochs = num_epochs
         self.batch_size = batch_size
+        self.valid_epochs = valid_epochs
 
     def train(self):
         feat_data, label_data = self.data['review'].x, self.data['review'].y
@@ -252,6 +310,8 @@ class ModelHandler():
         else:
             raise NotImplementedError("This optimizer is not implemented yet.")
 
+        f1_mac_best, auc_best, ep_best = 0, 0, -1
+
         for epoch in range(self.num_epochs):
             # Pick阶段，借助labelBalancedSampler进行一个降采样
             train_mask = LabelBalancedSampler(
@@ -284,4 +344,13 @@ class ModelHandler():
                 optimizer.step()
                 loss += loss.item()
 
-                print(f'Epoch: {epoch}, loss: {loss.item() / num_batches}')
+            print(f'Epoch: {epoch}, loss: {loss.item() / num_batches}')
+
+            # valid(每3个epoch valid一次)
+            if epoch % self.valid_epochs == 0:
+                print(f"valid at epoch {epoch} ", end=" ")
+                f1_mac_val, f1_1_val, f1_0_val, auc_val = GNN.test(
+                    feat_data, label_data, valid_mask, adj_lists)
+
+                if auc_val > auc_best:
+                    f1_mac_best, auc_best, ep_best = f1_mac_val, auc_val, epoch
